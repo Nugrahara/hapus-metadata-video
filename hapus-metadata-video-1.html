@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hapus Metadata Video</title>
+<style>
+  :root{
+    --bg:#EDEEF0;
+    --panel:#FFFFFF;
+    --ink:#1A1D21;
+    --muted:#6B7280;
+    --accent:#2E5CE6;
+    --accent-dark:#1E3FA0;
+    --success:#1F9D55;
+    --line:#DADDE1;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex;
+    justify-content:center;
+    padding:32px 16px 64px;
+  }
+  .wrap{width:100%;max-width:560px;}
+  h1{font-size:20px;font-weight:600;margin:0 0 4px;}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 24px;line-height:1.5;}
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:20px;
+    margin-bottom:16px;
+  }
+  #drop{
+    border:1.5px dashed var(--line);
+    border-radius:10px;
+    padding:32px 16px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  #drop.hover{border-color:var(--accent);background:#F3F6FE;}
+  #drop p{margin:0;font-size:14px;color:var(--muted);}
+  #drop strong{color:var(--ink);}
+  input[type=file]{display:none;}
+  .filename{
+    font-size:14px;
+    font-weight:600;
+    margin-top:4px;
+    word-break:break-all;
+  }
+  .row{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid var(--line);}
+  .row:last-child{border-bottom:none;}
+  .row .k{color:var(--muted);}
+  .row .v{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-align:right;max-width:60%;overflow-wrap:anywhere;}
+  table.meta{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px;}
+  table.meta td{padding:4px 6px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;vertical-align:top;}
+  table.meta td:first-child{color:var(--muted);white-space:nowrap;padding-right:12px;}
+  .empty{font-size:13px;color:var(--muted);font-style:italic;}
+  button{
+    width:100%;
+    padding:12px;
+    border-radius:10px;
+    border:none;
+    font-size:15px;
+    font-weight:600;
+    cursor:pointer;
+    background:var(--accent);
+    color:#fff;
+    transition:background .15s;
+  }
+  button:hover{background:var(--accent-dark);}
+  button:disabled{background:#B9C2D6;cursor:not-allowed;}
+  .bar-outer{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin:12px 0 4px;}
+  .bar-inner{height:100%;width:0%;background:var(--accent);transition:width .15s;}
+  .status{font-size:13px;color:var(--muted);}
+  .download{
+    display:none;
+    text-align:center;
+    text-decoration:none;
+    background:var(--success);
+    color:#fff;
+    padding:12px;
+    border-radius:10px;
+    font-weight:600;
+    font-size:15px;
+  }
+  .label{font-size:13px;font-weight:600;margin:0 0 8px;}
+  .note{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Hapus metadata video</h1>
+  <p class="sub">Semua proses jalan di browser kamu sendiri — video tidak diupload ke server manapun. Pakai ffmpeg.wasm dengan mode stream-copy, jadi cepat dan kualitas tidak turun.</p>
+
+  <div class="card">
+    <div id="drop">
+      <p><strong>Klik untuk pilih video</strong><br>atau tarik &amp; lepas file di sini</p>
+      <div class="filename" id="filename"></div>
+    </div>
+    <input type="file" id="fileInput" accept="video/*">
+  </div>
+
+  <div class="card" id="metaCard" style="display:none;">
+    <p class="label">Metadata sebelum dihapus</p>
+    <div id="metaBefore"><span class="empty">Belum ada data</span></div>
+  </div>
+
+  <div class="card" id="actionCard" style="display:none;">
+    <button id="processBtn">Hapus metadata</button>
+    <div class="bar-outer" id="barOuter" style="display:none;"><div class="bar-inner" id="barInner"></div></div>
+    <p class="status" id="statusText"></p>
+    <a class="download" id="downloadLink">Download video bersih</a>
+  </div>
+
+  <div class="card" id="afterCard" style="display:none;">
+    <p class="label">Metadata setelah dihapus</p>
+    <div id="metaAfter"></div>
+    <p class="note">Catatan: sebagian info dasar seperti durasi, resolusi, dan codec akan selalu tetap ada karena itu bukan metadata pribadi — bagian yang dihapus adalah tag seperti pembuat, software, lokasi, dan tanggal perangkat.</p>
+  </div>
+</div>
+
+<script type="module">
+import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js';
+import { fetchFile, toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js';
+
+// Core single-thread (bukan core-mt) supaya TIDAK butuh SharedArrayBuffer /
+// header cross-origin isolation — cocok untuk dibuka langsung dari file lokal.
+const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+
+const ffmpeg = new FFmpeg();
+
+let currentFile = null;
+let logBuffer = [];
+
+ffmpeg.on('log', ({ message }) => { logBuffer.push(message); });
+ffmpeg.on('progress', ({ progress }) => {
+  if (progress >= 0 && progress <= 1) {
+    document.getElementById('barInner').style.width = (progress * 100).toFixed(0) + '%';
+  }
+});
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+const filenameEl = document.getElementById('filename');
+const metaCard = document.getElementById('metaCard');
+const metaBefore = document.getElementById('metaBefore');
+const actionCard = document.getElementById('actionCard');
+const processBtn = document.getElementById('processBtn');
+const barOuter = document.getElementById('barOuter');
+const statusText = document.getElementById('statusText');
+const downloadLink = document.getElementById('downloadLink');
+const afterCard = document.getElementById('afterCard');
+const metaAfter = document.getElementById('metaAfter');
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('hover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length) handleFile(e.target.files[0]);
+});
+
+function parseMetadataFromLog(lines) {
+  const rows = [];
+  let inMeta = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^Metadata:$/.test(trimmed)) { inMeta = true; continue; }
+    if (inMeta) {
+      const m = trimmed.match(/^([A-Za-z0-9_\-\/. ]+)\s*:\s*(.*)$/);
+      if (m && !/^(Stream|Duration|Input|Output)/.test(trimmed)) {
+        rows.push([m[1].trim(), m[2].trim()]);
+      } else if (trimmed === '' || /^(Stream|Duration|Input|Output|At least)/.test(trimmed)) {
+        inMeta = false;
+      }
+    }
+  }
+  return rows;
+}
+
+function renderMeta(container, rows) {
+  if (!rows.length) {
+    container.innerHTML = '<span class="empty">Tidak ada metadata tersimpan di file ini</span>';
+    return;
+  }
+  let html = '<table class="meta">';
+  for (const [k, v] of rows) {
+    html += `<tr><td>${k}</td><td>${v || '-'}</td></tr>`;
+  }
+  html += '</table>';
+  container.innerHTML = html;
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout — jaringan terlalu lambat/terblokir`)), ms)
+    )
+  ]);
+}
+
+async function ensureLoaded() {
+  if (!ffmpeg.loaded) {
+    statusText.textContent = 'Memuat mesin ffmpeg (sekali saja, sekitar 20-30MB)...';
+    const coreURL = await withTimeout(toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'), 45000, 'Unduh ffmpeg-core.js');
+    const wasmURL = await withTimeout(toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'), 45000, 'Unduh ffmpeg-core.wasm');
+    const classWorkerURL = await withTimeout(
+      toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js', 'text/javascript'),
+      45000, 'Unduh worker.js'
+    );
+    await ffmpeg.load({ coreURL, wasmURL, classWorkerURL });
+  }
+}
+
+async function handleFile(file) {
+  currentFile = file;
+  filenameEl.textContent = file.name;
+  metaCard.style.display = 'block';
+  actionCard.style.display = 'block';
+  afterCard.style.display = 'none';
+  downloadLink.style.display = 'none';
+  metaBefore.innerHTML = '<span class="empty">Membaca metadata...</span>';
+  statusText.textContent = '';
+
+  try {
+    await ensureLoaded();
+    const ext = file.name.split('.').pop() || 'mp4';
+    const inName = 'input.' + ext;
+    await ffmpeg.writeFile(inName, await fetchFile(file));
+
+    logBuffer = [];
+    try { await ffmpeg.exec(['-i', inName]); } catch (e) { /* expected: no output specified */ }
+    renderMeta(metaBefore, parseMetadataFromLog(logBuffer));
+    statusText.textContent = '';
+  } catch (err) {
+    metaBefore.innerHTML = '<span class="empty">Gagal membaca metadata, tapi tetap bisa lanjut proses</span>';
+  }
+}
+
+processBtn.addEventListener('click', async () => {
+  if (!currentFile) return;
+  processBtn.disabled = true;
+  barOuter.style.display = 'block';
+  document.getElementById('barInner').style.width = '0%';
+  statusText.textContent = 'Menghapus metadata...';
+
+  try {
+    await ensureLoaded();
+    const ext = currentFile.name.split('.').pop() || 'mp4';
+    const inName = 'input.' + ext;
+    const outName = 'output.' + ext;
+
+    try {
+      await ffmpeg.readFile(inName);
+    } catch {
+      await ffmpeg.writeFile(inName, await fetchFile(currentFile));
+    }
+
+    await ffmpeg.exec(['-i', inName, '-map_metadata', '-1', '-c', 'copy', outName]);
+
+    const data = await ffmpeg.readFile(outName);
+    const blob = new Blob([data.buffer], { type: currentFile.type || 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+
+    downloadLink.href = url;
+    downloadLink.download = 'bersih-' + currentFile.name;
+    downloadLink.style.display = 'block';
+    downloadLink.textContent = 'Download: bersih-' + currentFile.name;
+
+    logBuffer = [];
+    try { await ffmpeg.exec(['-i', outName]); } catch (e) {}
+    renderMeta(metaAfter, parseMetadataFromLog(logBuffer));
+    afterCard.style.display = 'block';
+
+    statusText.textContent = 'Selesai. Metadata sudah dihapus tanpa re-encode.';
+  } catch (err) {
+    statusText.textContent = 'Gagal memproses: ' + err.message + '. Coba format lain atau pakai FFmpeg di komputer.';
+  } finally {
+    processBtn.disabled = false;
+    barOuter.style.display = 'none';
+  }
+});
+</script>
+</body>
+</html>

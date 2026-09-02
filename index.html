@@ -231,11 +231,11 @@ async function loadFromMirror(mirror, onProgress) {
   onProgress('Mengunduh ffmpeg-core.js...');
   const coreURL = await withTimeout(toBlobURL(`${mirror.core}/ffmpeg-core.js`, 'text/javascript'), 30000, 'ffmpeg-core.js');
   onProgress('Mengunduh ffmpeg-core.wasm (±25MB)...');
-  const wasmURL = await withTimeout(toBlobURL(`${mirror.core}/ffmpeg-core.wasm`, 'application/wasm'), 90000, 'ffmpeg-core.wasm');
+  const wasmURL = await withTimeout(toBlobURL(`${mirror.core}/ffmpeg-core.wasm`, 'application/wasm'), 150000, 'ffmpeg-core.wasm');
   onProgress('Mengunduh worker.js...');
   const classWorkerURL = await withTimeout(toBlobURL(mirror.worker, 'text/javascript'), 30000, 'worker.js');
   onProgress('Menyalakan mesin ffmpeg...');
-  await withTimeout(ffmpeg.load({ coreURL, wasmURL, classWorkerURL }), 30000, 'ffmpeg.load()');
+  await withTimeout(ffmpeg.load({ coreURL, wasmURL, classWorkerURL }), 120000, 'ffmpeg.load()');
 }
 
 async function ensureLoaded() {

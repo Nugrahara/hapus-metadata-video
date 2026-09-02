@@ -131,19 +131,33 @@ import { fetchFile, toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@
 
 // Core single-thread (bukan core-mt) supaya TIDAK butuh SharedArrayBuffer /
 // header cross-origin isolation — cocok untuk dibuka langsung dari file lokal.
-const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+// Dua mirror CDN disiapkan: kalau yang pertama macet/gagal, otomatis coba yang kedua.
+const CORE_MIRRORS = [
+  {
+    core: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm',
+    worker: 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js'
+  },
+  {
+    core: 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm',
+    worker: 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js'
+  }
+];
 
-const ffmpeg = new FFmpeg();
+let ffmpeg = new FFmpeg();
+let loadPromise = null; // supaya tidak load dobel kalau diklik/dipicu berkali-kali
 
 let currentFile = null;
 let logBuffer = [];
 
-ffmpeg.on('log', ({ message }) => { logBuffer.push(message); });
-ffmpeg.on('progress', ({ progress }) => {
-  if (progress >= 0 && progress <= 1) {
-    document.getElementById('barInner').style.width = (progress * 100).toFixed(0) + '%';
-  }
-});
+function attachHandlers(instance) {
+  instance.on('log', ({ message }) => { logBuffer.push(message); console.log('[ffmpeg]', message); });
+  instance.on('progress', ({ progress }) => {
+    if (progress >= 0 && progress <= 1) {
+      document.getElementById('barInner').style.width = (progress * 100).toFixed(0) + '%';
+    }
+  });
+}
+attachHandlers(ffmpeg);
 
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
@@ -205,21 +219,53 @@ function withTimeout(promise, ms, label) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timeout — jaringan terlalu lambat/terblokir`)), ms)
+      setTimeout(() => reject(new Error(`${label} timeout`)), ms)
     )
   ]);
 }
 
+// Coba load dari satu mirror CDN. Ada timeout di tiap file DAN di ffmpeg.load()
+// itu sendiri, karena ffmpeg.load() diketahui kadang macet (hang) tanpa error
+// walau file-nya sudah kebaca, jadi tidak boleh dibiarkan tanpa batas waktu.
+async function loadFromMirror(mirror, onProgress) {
+  onProgress('Mengunduh ffmpeg-core.js...');
+  const coreURL = await withTimeout(toBlobURL(`${mirror.core}/ffmpeg-core.js`, 'text/javascript'), 30000, 'ffmpeg-core.js');
+  onProgress('Mengunduh ffmpeg-core.wasm (±25MB)...');
+  const wasmURL = await withTimeout(toBlobURL(`${mirror.core}/ffmpeg-core.wasm`, 'application/wasm'), 90000, 'ffmpeg-core.wasm');
+  onProgress('Mengunduh worker.js...');
+  const classWorkerURL = await withTimeout(toBlobURL(mirror.worker, 'text/javascript'), 30000, 'worker.js');
+  onProgress('Menyalakan mesin ffmpeg...');
+  await withTimeout(ffmpeg.load({ coreURL, wasmURL, classWorkerURL }), 30000, 'ffmpeg.load()');
+}
+
 async function ensureLoaded() {
-  if (!ffmpeg.loaded) {
-    statusText.textContent = 'Memuat mesin ffmpeg (sekali saja, sekitar 20-30MB)...';
-    const coreURL = await withTimeout(toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'), 45000, 'Unduh ffmpeg-core.js');
-    const wasmURL = await withTimeout(toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'), 45000, 'Unduh ffmpeg-core.wasm');
-    const classWorkerURL = await withTimeout(
-      toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js', 'text/javascript'),
-      45000, 'Unduh worker.js'
-    );
-    await ffmpeg.load({ coreURL, wasmURL, classWorkerURL });
+  if (ffmpeg.loaded) return;
+  if (loadPromise) return loadPromise; // sudah ada proses load berjalan, ikut yang itu
+
+  loadPromise = (async () => {
+    let lastErr = null;
+    for (let i = 0; i < CORE_MIRRORS.length; i++) {
+      try {
+        await loadFromMirror(CORE_MIRRORS[i], msg => {
+          statusText.textContent = msg + (i > 0 ? ' (mirror cadangan)' : '');
+        });
+        return; // berhasil
+      } catch (err) {
+        console.error('Mirror', i, 'gagal:', err);
+        lastErr = err;
+        // Instance FFmpeg lama bisa nyangkut di state aneh setelah gagal, bikin baru
+        try { ffmpeg.terminate(); } catch (_) {}
+        ffmpeg = new FFmpeg();
+        attachHandlers(ffmpeg);
+      }
+    }
+    throw new Error('Gagal memuat mesin ffmpeg dari semua mirror (' + (lastErr ? lastErr.message : 'unknown') + '). Cek koneksi internet / VPN, lalu klik lagi.');
+  })();
+
+  try {
+    await loadPromise;
+  } finally {
+    loadPromise = null;
   }
 }
 
@@ -244,7 +290,9 @@ async function handleFile(file) {
     renderMeta(metaBefore, parseMetadataFromLog(logBuffer));
     statusText.textContent = '';
   } catch (err) {
-    metaBefore.innerHTML = '<span class="empty">Gagal membaca metadata, tapi tetap bisa lanjut proses</span>';
+    console.error('Gagal baca metadata:', err);
+    metaBefore.innerHTML = '<span class="empty">Gagal membaca metadata (' + err.message + '), tapi tombol di bawah tetap bisa dicoba</span>';
+    statusText.textContent = '';
   }
 }
 
